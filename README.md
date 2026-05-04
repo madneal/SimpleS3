@@ -90,6 +90,17 @@ src-tauri/target/release/bundle/macos/SimpleS3.app
 
 For cross-platform releases, build on each target operating system or use CI runners for macOS, Windows, and Linux. Tauri apps are native bundles, so macOS builds are produced on macOS, Windows installers on Windows, and Linux packages on Linux.
 
+## Release
+
+Release builds are handled by GitHub Actions. Push a version tag that starts with `v`:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds macOS Apple Silicon, macOS Intel, Windows, and Linux bundles, creates a GitHub Release for the tag, and uploads the generated installer assets.
+
 ## Architecture
 
 ```text
