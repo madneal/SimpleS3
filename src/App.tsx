@@ -1,32 +1,606 @@
+import { useMemo, useState } from "react";
+import { open, save } from "@tauri-apps/api/dialog";
+import { invoke } from "@tauri-apps/api/tauri";
 import "./App.css";
-import {useNavigate, BrowserRouter as Router, Route, Routes } from 'react-router-dom';
-import Option from './views/Option';
+import Option, { type S3Config } from "./views/Option";
 
-const Home = () => {
-    const navigate = useNavigate();
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        navigate('/option');
+interface Profile {
+  id: string;
+  name: string;
+  config: S3Config;
+}
+
+interface ConnectionReport {
+  message: string;
+  bucketReachable: boolean;
+  buckets: string[];
+}
+
+interface RemoteObject {
+  key: string;
+  name: string;
+  kind: "folder" | "object";
+  size: number;
+  lastModified: string | null;
+  storageClass: string | null;
+  eTag: string | null;
+}
+
+interface ObjectList {
+  bucket: string;
+  prefix: string;
+  objects: RemoteObject[];
+  isTruncated: boolean;
+  nextToken: string | null;
+}
+
+interface ObjectAction {
+  key: string;
+  size: number;
+}
+
+type StatusKind = "idle" | "busy" | "success" | "error";
+
+interface Status {
+  kind: StatusKind;
+  text: string;
+}
+
+const STORAGE_KEY = "simples3.profiles.v1";
+
+const defaultConfig: S3Config = {
+  accessKeyId: "",
+  secretAccessKey: "",
+  region: "us-east-1",
+  bucketName: "",
+  endpoint: "",
+  pathStyle: true,
+};
+
+const defaultStatus: Status = {
+  kind: "idle",
+  text: "Ready",
+};
+
+function createId() {
+  return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function loadProfiles(): Profile[] {
+  try {
+    const rawProfiles = window.localStorage.getItem(STORAGE_KEY);
+    if (!rawProfiles) {
+      return [];
     }
-    return (
-        <div className="container">
-            <form className="row" onSubmit={handleSubmit}>
-                <input id="option-name" placeholder="Enter a name..." />
-                <button type="submit">New</button>
-            </form>
-        </div>
-    );
+
+    const parsed = JSON.parse(rawProfiles) as Profile[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveProfiles(profiles: Profile[]) {
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
+}
+
+function initialState() {
+  const profiles = loadProfiles();
+  const activeProfile = profiles[0];
+
+  return {
+    profiles,
+    activeProfileId: activeProfile?.id ?? null,
+    profileName: activeProfile?.name ?? "New profile",
+    config: activeProfile?.config ?? defaultConfig,
+    rememberSecret: Boolean(activeProfile?.config.secretAccessKey),
+  };
+}
+
+function formatBytes(bytes: number) {
+  if (bytes === 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** exponent;
+  return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
+}
+
+function formatDate(value: string | null) {
+  if (!value) {
+    return "-";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString();
+}
+
+function fileNameFromPath(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? "upload.bin";
+}
+
+function objectNameFromKey(key: string) {
+  return key.split("/").filter(Boolean).pop() ?? key;
+}
+
+function ensurePrefix(prefix: string) {
+  const trimmed = prefix.trim().replace(/^\/+/, "");
+  return trimmed && !trimmed.endsWith("/") ? `${trimmed}/` : trimmed;
+}
+
+function joinKey(prefix: string, name: string) {
+  const cleanName = name.trim().replace(/^\/+/, "");
+  return `${ensurePrefix(prefix)}${cleanName}`;
+}
+
+function buildCrumbs(bucketName: string, prefix: string) {
+  const segments = prefix.split("/").filter(Boolean);
+  const crumbs = [{ label: bucketName || "Bucket", prefix: "" }];
+
+  segments.forEach((segment, index) => {
+    crumbs.push({
+      label: segment,
+      prefix: `${segments.slice(0, index + 1).join("/")}/`,
+    });
+  });
+
+  return crumbs;
+}
+
+function safeError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function App() {
-    return (
-        <Router>
-            <Routes>
-                <Route path="/" element={<Home />} />
-                <Route path="/option" element={<Option onSubmit={(config) => console.log(config)} />} />
-            </Routes>
-        </Router>
-    );
+  const [boot] = useState(initialState);
+  const [profiles, setProfiles] = useState<Profile[]>(boot.profiles);
+  const [activeProfileId, setActiveProfileId] = useState<string | null>(boot.activeProfileId);
+  const [profileName, setProfileName] = useState(boot.profileName);
+  const [config, setConfig] = useState<S3Config>(boot.config);
+  const [rememberSecret, setRememberSecret] = useState(boot.rememberSecret);
+  const [status, setStatus] = useState<Status>(defaultStatus);
+  const [connectionReport, setConnectionReport] = useState<ConnectionReport | null>(null);
+  const [objects, setObjects] = useState<RemoteObject[]>([]);
+  const [prefix, setPrefix] = useState("");
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [folderName, setFolderName] = useState("");
+
+  const busy = status.kind === "busy";
+  const selectedObject = objects.find((object) => object.key === selectedKey) ?? null;
+  const crumbs = buildCrumbs(config.bucketName, prefix);
+
+  const filteredObjects = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+    if (!query) {
+      return objects;
+    }
+
+    return objects.filter((object) => {
+      return (
+        object.key.toLowerCase().includes(query) ||
+        object.name.toLowerCase().includes(query) ||
+        object.kind.toLowerCase().includes(query)
+      );
+    });
+  }, [objects, searchTerm]);
+
+  const objectCount = objects.filter((object) => object.kind === "object").length;
+  const folderCount = objects.filter((object) => object.kind === "folder").length;
+  const totalSize = objects.reduce((size, object) => size + object.size, 0);
+
+  const setProfileStore = (nextProfiles: Profile[]) => {
+    setProfiles(nextProfiles);
+    saveProfiles(nextProfiles);
+  };
+
+  const persistableConfig = () => ({
+    ...config,
+    secretAccessKey: rememberSecret ? config.secretAccessKey : "",
+  });
+
+  const selectProfile = (profile: Profile) => {
+    setActiveProfileId(profile.id);
+    setProfileName(profile.name);
+    setConfig(profile.config);
+    setRememberSecret(Boolean(profile.config.secretAccessKey));
+    setConnectionReport(null);
+    setObjects([]);
+    setPrefix("");
+    setSelectedKey(null);
+    setStatus(defaultStatus);
+  };
+
+  const createProfile = () => {
+    setActiveProfileId(null);
+    setProfileName("New profile");
+    setConfig(defaultConfig);
+    setRememberSecret(false);
+    setConnectionReport(null);
+    setObjects([]);
+    setPrefix("");
+    setSelectedKey(null);
+    setStatus(defaultStatus);
+  };
+
+  const saveProfile = () => {
+    const name = profileName.trim() || config.bucketName.trim() || "Untitled profile";
+    const nextProfile: Profile = {
+      id: activeProfileId ?? createId(),
+      name,
+      config: persistableConfig(),
+    };
+    const exists = profiles.some((profile) => profile.id === nextProfile.id);
+    const nextProfiles = exists
+      ? profiles.map((profile) => (profile.id === nextProfile.id ? nextProfile : profile))
+      : [nextProfile, ...profiles];
+
+    setActiveProfileId(nextProfile.id);
+    setProfileName(name);
+    setProfileStore(nextProfiles);
+    setStatus({ kind: "success", text: "Profile saved" });
+  };
+
+  const updateConfig = (nextConfig: S3Config) => {
+    setConfig(nextConfig);
+    setConnectionReport(null);
+  };
+
+  const loadObjects = async (targetPrefix = prefix, targetConfig = config) => {
+    setStatus({ kind: "busy", text: "Loading objects" });
+    const response = await invoke<ObjectList>("list_objects", {
+      config: targetConfig,
+      prefix: targetPrefix,
+    });
+    setObjects(response.objects);
+    setPrefix(response.prefix);
+    setSelectedKey(null);
+    setStatus({
+      kind: "success",
+      text: `${response.objects.length} items loaded`,
+    });
+  };
+
+  const testConnection = async () => {
+    try {
+      setStatus({ kind: "busy", text: "Testing connection" });
+      const report = await invoke<ConnectionReport>("test_connection", { config });
+      setConnectionReport(report);
+      setStatus({ kind: "success", text: report.message });
+
+      if (config.bucketName.trim()) {
+        await loadObjects("", config);
+      }
+    } catch (error) {
+      setConnectionReport(null);
+      setStatus({ kind: "error", text: safeError(error) });
+    }
+  };
+
+  const refreshObjects = async () => {
+    try {
+      await loadObjects();
+    } catch (error) {
+      setStatus({ kind: "error", text: safeError(error) });
+    }
+  };
+
+  const enterFolder = async (key: string) => {
+    try {
+      await loadObjects(key);
+    } catch (error) {
+      setStatus({ kind: "error", text: safeError(error) });
+    }
+  };
+
+  const chooseBucket = async (bucketName: string) => {
+    const nextConfig = { ...config, bucketName };
+    setConfig(nextConfig);
+
+    try {
+      await loadObjects("", nextConfig);
+    } catch (error) {
+      setStatus({ kind: "error", text: safeError(error) });
+    }
+  };
+
+  const uploadObject = async () => {
+    const selectedPath = await open({ multiple: false });
+    if (!selectedPath || Array.isArray(selectedPath)) {
+      return;
+    }
+
+    const key = joinKey(prefix, fileNameFromPath(selectedPath));
+
+    try {
+      setStatus({ kind: "busy", text: "Uploading object" });
+      const action = await invoke<ObjectAction>("upload_file", {
+        config,
+        filePath: selectedPath,
+        key,
+      });
+      setStatus({ kind: "success", text: `Uploaded ${formatBytes(action.size)}` });
+      await loadObjects();
+    } catch (error) {
+      setStatus({ kind: "error", text: safeError(error) });
+    }
+  };
+
+  const downloadSelectedObject = async () => {
+    if (!selectedObject || selectedObject.kind !== "object") {
+      return;
+    }
+
+    const destinationPath = await save({
+      defaultPath: objectNameFromKey(selectedObject.key),
+    });
+
+    if (!destinationPath) {
+      return;
+    }
+
+    try {
+      setStatus({ kind: "busy", text: "Downloading object" });
+      const action = await invoke<ObjectAction>("download_object", {
+        config,
+        key: selectedObject.key,
+        destinationPath,
+      });
+      setStatus({ kind: "success", text: `Downloaded ${formatBytes(action.size)}` });
+    } catch (error) {
+      setStatus({ kind: "error", text: safeError(error) });
+    }
+  };
+
+  const deleteSelectedObject = async () => {
+    if (!selectedObject) {
+      return;
+    }
+
+    const confirmed = window.confirm(`Delete ${selectedObject.key}?`);
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setStatus({ kind: "busy", text: "Deleting object" });
+      await invoke<ObjectAction>("delete_object", {
+        config,
+        key: selectedObject.key,
+      });
+      setStatus({ kind: "success", text: "Object deleted" });
+      await loadObjects();
+    } catch (error) {
+      setStatus({ kind: "error", text: safeError(error) });
+    }
+  };
+
+  const createFolder = async () => {
+    const cleanFolderName = folderName.trim().replace(/^\/+|\/+$/g, "");
+    if (!cleanFolderName) {
+      return;
+    }
+
+    try {
+      setStatus({ kind: "busy", text: "Creating folder" });
+      await invoke<ObjectAction>("create_folder", {
+        config,
+        key: joinKey(prefix, cleanFolderName),
+      });
+      setFolderName("");
+      setStatus({ kind: "success", text: "Folder created" });
+      await loadObjects();
+    } catch (error) {
+      setStatus({ kind: "error", text: safeError(error) });
+    }
+  };
+
+  return (
+    <main className="app-shell">
+      <aside className="sidebar">
+        <div className="brand-block">
+          <div>
+            <span className="eyebrow">SimpleS3</span>
+            <h1>S3 Manager</h1>
+          </div>
+          <span className={`status-dot ${status.kind}`} />
+        </div>
+
+        <section className="profile-section" aria-label="Profiles">
+          <div className="section-title-row">
+            <h2>Profiles</h2>
+            <button className="icon-button" type="button" onClick={createProfile} title="New profile">
+              +
+            </button>
+          </div>
+          <div className="profile-list">
+            {profiles.length === 0 ? (
+              <div className="empty-compact">No saved profiles</div>
+            ) : (
+              profiles.map((profile) => (
+                <button
+                  className={`profile-item ${activeProfileId === profile.id ? "active" : ""}`}
+                  key={profile.id}
+                  type="button"
+                  onClick={() => selectProfile(profile)}
+                >
+                  <span>{profile.name}</span>
+                  <small>{profile.config.bucketName || profile.config.endpoint || "Unassigned"}</small>
+                </button>
+              ))
+            )}
+          </div>
+        </section>
+
+        <Option
+          profileName={profileName}
+          config={config}
+          rememberSecret={rememberSecret}
+          busy={busy}
+          onProfileNameChange={setProfileName}
+          onConfigChange={updateConfig}
+          onRememberSecretChange={setRememberSecret}
+          onSave={saveProfile}
+          onTest={testConnection}
+        />
+      </aside>
+
+      <section className="workspace">
+        <header className="topbar">
+          <div>
+            <div className="bucket-label">{config.bucketName || "No bucket selected"}</div>
+            <div className="endpoint-line">{config.endpoint || "AWS S3 default endpoint"}</div>
+          </div>
+          <div className="topbar-actions">
+            <button className="secondary-button" type="button" onClick={refreshObjects} disabled={busy}>
+              Refresh
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={downloadSelectedObject}
+              disabled={busy || !selectedObject || selectedObject.kind !== "object"}
+            >
+              Download
+            </button>
+            <button
+              className="danger-button"
+              type="button"
+              onClick={deleteSelectedObject}
+              disabled={busy || !selectedObject}
+            >
+              Delete
+            </button>
+            <button className="primary-button" type="button" onClick={uploadObject} disabled={busy}>
+              Upload
+            </button>
+          </div>
+        </header>
+
+        <div className={`status-strip ${status.kind}`}>
+          <span>{status.text}</span>
+          {connectionReport?.bucketReachable ? <strong>Bucket reachable</strong> : null}
+        </div>
+
+        {connectionReport?.buckets.length ? (
+          <div className="bucket-strip">
+            {connectionReport.buckets.map((bucket) => (
+              <button
+                key={bucket}
+                className={bucket === config.bucketName ? "bucket-chip active" : "bucket-chip"}
+                type="button"
+                onClick={() => chooseBucket(bucket)}
+              >
+                {bucket}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        <section className="object-toolbar">
+          <nav className="crumbs" aria-label="Prefix">
+            {crumbs.map((crumb, index) => (
+              <button
+                key={`${crumb.prefix}-${index}`}
+                type="button"
+                onClick={() => enterFolder(crumb.prefix)}
+                disabled={busy || crumb.prefix === prefix}
+              >
+                {crumb.label}
+              </button>
+            ))}
+          </nav>
+          <div className="object-tools">
+            <input
+              className="search-input"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="Search objects"
+            />
+            <input
+              className="folder-input"
+              value={folderName}
+              onChange={(event) => setFolderName(event.target.value)}
+              placeholder="Folder name"
+            />
+            <button className="secondary-button" type="button" onClick={createFolder} disabled={busy}>
+              New Folder
+            </button>
+          </div>
+        </section>
+
+        <section className="metrics-grid" aria-label="Object metrics">
+          <div>
+            <span>Objects</span>
+            <strong>{objectCount}</strong>
+          </div>
+          <div>
+            <span>Folders</span>
+            <strong>{folderCount}</strong>
+          </div>
+          <div>
+            <span>Total size</span>
+            <strong>{formatBytes(totalSize)}</strong>
+          </div>
+          <div>
+            <span>Prefix</span>
+            <strong>{prefix || "/"}</strong>
+          </div>
+        </section>
+
+        <section className="object-panel">
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Size</th>
+                  <th>Modified</th>
+                  <th>Storage</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredObjects.length === 0 ? (
+                  <tr>
+                    <td className="empty-table" colSpan={5}>
+                      No objects
+                    </td>
+                  </tr>
+                ) : (
+                  filteredObjects.map((object) => (
+                    <tr
+                      key={object.key}
+                      className={selectedKey === object.key ? "selected" : ""}
+                      onClick={() => setSelectedKey(object.key)}
+                      onDoubleClick={() => object.kind === "folder" && enterFolder(object.key)}
+                    >
+                      <td>
+                        <span className={`object-icon ${object.kind}`}>
+                          {object.kind === "folder" ? "DIR" : "OBJ"}
+                        </span>
+                        <span>{object.name || object.key}</span>
+                      </td>
+                      <td>{object.kind}</td>
+                      <td>{object.kind === "folder" ? "-" : formatBytes(object.size)}</td>
+                      <td>{formatDate(object.lastModified)}</td>
+                      <td>{object.storageClass ?? "-"}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+  );
 }
 
 export default App;

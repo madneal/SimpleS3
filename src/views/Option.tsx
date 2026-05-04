@@ -1,111 +1,148 @@
-import React, { useState } from 'react';
-import './style.css';
+import type { ChangeEvent, FormEvent } from "react";
+import "./style.css";
+
+export interface S3Config {
+  accessKeyId: string;
+  secretAccessKey: string;
+  region: string;
+  bucketName: string;
+  endpoint: string;
+  pathStyle: boolean;
+}
 
 interface S3OptionsProps {
-    initialConfig?: {
-        accessKeyId: string;
-        secretAccessKey: string;
-        region: string;
-        bucketName: string;
-    };
-    onSubmit: (config: S3Config) => void;
+  profileName: string;
+  config: S3Config;
+  rememberSecret: boolean;
+  busy: boolean;
+  onProfileNameChange: (name: string) => void;
+  onConfigChange: (config: S3Config) => void;
+  onRememberSecretChange: (rememberSecret: boolean) => void;
+  onSave: () => void;
+  onTest: () => void;
 }
 
-interface S3Config {
-    accessKeyId: string;
-    secretAccessKey: string;
-    region: string;
-    bucketName: string;
-}
+const Option = ({
+  profileName,
+  config,
+  rememberSecret,
+  busy,
+  onProfileNameChange,
+  onConfigChange,
+  onRememberSecretChange,
+  onSave,
+  onTest,
+}: S3OptionsProps) => {
+  const handleConfigChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { name, type, checked, value } = event.target;
+    onConfigChange({
+      ...config,
+      [name]: type === "checkbox" ? checked : value,
+    });
+  };
 
-const Option: React.FC<S3OptionsProps> = ({ initialConfig, onSubmit }) => {
-    const [config, setConfig] = useState<S3Config>(
-        initialConfig || {
-            accessKeyId: '',
-            secretAccessKey: '',
-            region: '',
-            bucketName: '',
-        }
-    );
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    onTest();
+  };
 
-    const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const { name, value } = e.target;
-        setConfig({
-            ...config,
-            [name]: value,
-        });
-    };
+  return (
+    <form className="connection-form" onSubmit={handleSubmit}>
+      <label className="field">
+        <span>Profile</span>
+        <input
+          name="profileName"
+          value={profileName}
+          onChange={(event) => onProfileNameChange(event.target.value)}
+          placeholder="Production assets"
+        />
+      </label>
 
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        onSubmit(config);
-    };
+      <label className="field">
+        <span>Access key ID</span>
+        <input
+          name="accessKeyId"
+          value={config.accessKeyId}
+          onChange={handleConfigChange}
+          autoComplete="username"
+          required
+        />
+      </label>
 
-    return (
-        <form onSubmit={handleSubmit}>
-            <div>
-                <label>
-                    AK:
-                    <input
-                        type="text"
-                        name="accessKeyId"
-                        value={config.accessKeyId}
-                        onChange={handleChange}
-                        required
-                    />
-                </label>
-            </div>
-            <div>
-                <label>
-                    SK:
-                    <input
-                        type="password"
-                        name="secretAccessKey"
-                        value={config.secretAccessKey}
-                        onChange={handleChange}
-                        required
-                    />
-                </label>
-            </div>
-            <div>
-                <label>
-                    Region:
-                    <input
-                        type="text"
-                        name="region"
-                        value={config.region}
-                        onChange={handleChange}
-                        required
-                    />
-                </label>
-            </div>
-            <div>
-                <label>
-                    Bucket Name:
-                    <input
-                        type="text"
-                        name="bucketName"
-                        value={config.bucketName}
-                        onChange={handleChange}
-                        required
-                    />
-                </label>
-            </div>
-            <div>
-                <label>
-                    Bucket Name:
-                    <input
-                        type="text"
-                        name="bucketName"
-                        value={config.bucketName}
-                        onChange={handleChange}
-                        required
-                    />
-                </label>
-            </div>
-            <button type="submit">Save Configuration</button>
-        </form>
-    );
+      <label className="field">
+        <span>Secret access key</span>
+        <input
+          name="secretAccessKey"
+          type="password"
+          value={config.secretAccessKey}
+          onChange={handleConfigChange}
+          autoComplete="current-password"
+          required
+        />
+      </label>
+
+      <div className="field-grid">
+        <label className="field">
+          <span>Region</span>
+          <input
+            name="region"
+            value={config.region}
+            onChange={handleConfigChange}
+            placeholder="us-east-1"
+            required
+          />
+        </label>
+
+        <label className="field">
+          <span>Bucket</span>
+          <input
+            name="bucketName"
+            value={config.bucketName}
+            onChange={handleConfigChange}
+            required
+          />
+        </label>
+      </div>
+
+      <label className="field">
+        <span>Endpoint URL</span>
+        <input
+          name="endpoint"
+          value={config.endpoint}
+          onChange={handleConfigChange}
+          placeholder="https://s3.amazonaws.com"
+        />
+      </label>
+
+      <label className="check-row">
+        <input
+          name="pathStyle"
+          type="checkbox"
+          checked={config.pathStyle}
+          onChange={handleConfigChange}
+        />
+        <span>Path-style requests</span>
+      </label>
+
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={rememberSecret}
+          onChange={(event) => onRememberSecretChange(event.target.checked)}
+        />
+        <span>Remember secret locally</span>
+      </label>
+
+      <div className="connection-actions">
+        <button type="submit" className="primary-button" disabled={busy}>
+          Test
+        </button>
+        <button type="button" className="secondary-button" onClick={onSave}>
+          Save
+        </button>
+      </div>
+    </form>
+  );
 };
 
 export default Option;
