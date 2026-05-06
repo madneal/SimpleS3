@@ -12,30 +12,31 @@
 
 .field span,
 .check-row span {
-  color: #c9d5db;
-  font-size: 0.82rem;
-  font-weight: 800;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 700;
 }
 
 .field input {
   width: 100%;
   min-width: 0;
-  height: 40px;
-  padding: 0 12px;
-  color: #f8fbfc;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
+  height: 38px;
+  padding: 0 11px;
+  color: var(--text);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   outline: none;
 }
 
 .field input::placeholder {
-  color: #8fa1aa;
+  color: var(--text-soft);
 }
 
 .field input:focus {
-  border-color: #84d4b4;
-  box-shadow: 0 0 0 3px rgba(132, 212, 180, 0.16);
+  background: var(--surface);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(34, 119, 95, 0.14);
 }
 
 .field-grid {
@@ -56,7 +57,7 @@
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
-  accent-color: #72d2a8;
+  accent-color: var(--accent);
 }
 
 .connection-actions {
