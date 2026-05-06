@@ -153,6 +153,21 @@ function buildCrumbs(bucketName: string, prefix: string) {
   return crumbs;
 }
 
+function appendUniqueObjects(currentObjects: RemoteObject[], nextObjects: RemoteObject[]) {
+  const knownKeys = new Set(currentObjects.map((object) => object.key));
+  return [
+    ...currentObjects,
+    ...nextObjects.filter((object) => {
+      if (knownKeys.has(object.key)) {
+        return false;
+      }
+
+      knownKeys.add(object.key);
+      return true;
+    }),
+  ];
+}
+
 function safeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -168,6 +183,8 @@ function App() {
   const [connectionReport, setConnectionReport] = useState<ConnectionReport | null>(null);
   const [objects, setObjects] = useState<RemoteObject[]>([]);
   const [prefix, setPrefix] = useState("");
+  const [isTruncated, setIsTruncated] = useState(false);
+  const [nextToken, setNextToken] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [folderName, setFolderName] = useState("");
@@ -213,6 +230,8 @@ function App() {
     setConnectionReport(null);
     setObjects([]);
     setPrefix("");
+    setIsTruncated(false);
+    setNextToken(null);
     setSelectedKey(null);
     setStatus(defaultStatus);
   };
@@ -225,6 +244,8 @@ function App() {
     setConnectionReport(null);
     setObjects([]);
     setPrefix("");
+    setIsTruncated(false);
+    setNextToken(null);
     setSelectedKey(null);
     setStatus(defaultStatus);
   };
@@ -252,18 +273,31 @@ function App() {
     setConnectionReport(null);
   };
 
-  const loadObjects = async (targetPrefix = prefix, targetConfig = config) => {
-    setStatus({ kind: "busy", text: "Loading objects" });
+  const loadObjects = async (
+    targetPrefix = prefix,
+    targetConfig = config,
+    continuationToken: string | null = null,
+  ) => {
+    setStatus({ kind: "busy", text: continuationToken ? "Loading more objects" : "Loading objects" });
     const response = await invoke<ObjectList>("list_objects", {
       config: targetConfig,
       prefix: targetPrefix,
+      continuationToken,
     });
-    setObjects(response.objects);
+    setObjects((currentObjects) =>
+      continuationToken ? appendUniqueObjects(currentObjects, response.objects) : response.objects,
+    );
     setPrefix(response.prefix);
-    setSelectedKey(null);
+    setIsTruncated(response.isTruncated);
+    setNextToken(response.nextToken);
+    if (!continuationToken) {
+      setSelectedKey(null);
+    }
     setStatus({
       kind: "success",
-      text: `${response.objects.length} items loaded`,
+      text: continuationToken
+        ? `${response.objects.length} more items loaded`
+        : `${response.objects.length} items loaded`,
     });
   };
 
@@ -286,6 +320,18 @@ function App() {
   const refreshObjects = async () => {
     try {
       await loadObjects();
+    } catch (error) {
+      setStatus({ kind: "error", text: safeError(error) });
+    }
+  };
+
+  const loadMoreObjects = async () => {
+    if (!nextToken) {
+      return;
+    }
+
+    try {
+      await loadObjects(prefix, config, nextToken);
     } catch (error) {
       setStatus({ kind: "error", text: safeError(error) });
     }
@@ -597,6 +643,19 @@ function App() {
               </tbody>
             </table>
           </div>
+          {isTruncated || nextToken ? (
+            <div className="pagination-bar">
+              <span>More objects are available for this prefix.</span>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={loadMoreObjects}
+                disabled={busy || !nextToken}
+              >
+                Load more
+              </button>
+            </div>
+          ) : null}
         </section>
       </section>
     </main>

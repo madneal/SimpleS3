@@ -149,20 +149,31 @@ async fn test_connection(config: S3Config) -> Result<ConnectionReport, String> {
 }
 
 #[tauri::command]
-async fn list_objects(config: S3Config, prefix: Option<String>) -> Result<ObjectList, String> {
+async fn list_objects(
+    config: S3Config,
+    prefix: Option<String>,
+    continuation_token: Option<String>,
+) -> Result<ObjectList, String> {
     let client = client_from(&config)?;
     let bucket = bucket_name(&config)?;
     let prefix = normalize_prefix(prefix);
 
-    let response = client
+    let mut request = client
         .list_objects_v2()
         .bucket(&bucket)
         .prefix(&prefix)
         .delimiter("/")
-        .max_keys(1000)
-        .send()
-        .await
-        .map_err(|err| err.to_string())?;
+        .max_keys(1000);
+
+    if let Some(token) = continuation_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        request = request.continuation_token(token);
+    }
+
+    let response = request.send().await.map_err(|err| err.to_string())?;
 
     let mut objects = Vec::new();
 
