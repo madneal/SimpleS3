@@ -104,8 +104,7 @@ const Option = ({
             name="region"
             value={config.region}
             onChange={handleConfigChange}
-            placeholder="us-east-1"
-            required
+            placeholder="us-east-1 default"
           />
         </label>
 

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
 const KEYCHAIN_SERVICE: &str = "SimpleS3";
+const DEFAULT_REGION: &str = "us-east-1";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,7 +77,12 @@ fn required(value: &str, label: &str) -> Result<String, String> {
 fn client_from(config: &S3Config) -> Result<Client, String> {
     let access_key_id = required(&config.access_key_id, "Access key ID")?;
     let secret_access_key = required(&config.secret_access_key, "Secret access key")?;
-    let region = required(&config.region, "Region")?;
+    let region = config.region.trim();
+    let region = if region.is_empty() {
+        DEFAULT_REGION.to_owned()
+    } else {
+        region.to_owned()
+    };
     let session_token = config.session_token.trim();
 
     let credentials = Credentials::new(

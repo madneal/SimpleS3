@@ -58,7 +58,7 @@ const defaultConfig: S3Config = {
   accessKeyId: "",
   secretAccessKey: "",
   sessionToken: "",
-  region: "us-east-1",
+  region: "",
   bucketName: "",
   endpoint: "",
   pathStyle: true,
@@ -126,7 +126,7 @@ function loadProfiles(): Profile[] {
       const config = normalizeConfig(profile.config);
       return {
         id: profile.id ?? createId(),
-        name: profile.name ?? "Untitled profile",
+        name: profile.name ?? "",
         config,
         rememberSecret: Boolean(profile.rememberSecret ?? hasSecretMaterial(config)),
       };
@@ -147,7 +147,7 @@ function initialState() {
   return {
     profiles,
     activeProfileId: activeProfile?.id ?? null,
-    profileName: activeProfile?.name ?? "New profile",
+    profileName: activeProfile?.name ?? "",
     config: activeProfile?.config ?? defaultConfig,
     rememberSecret: Boolean(activeProfile?.rememberSecret),
   };
@@ -322,7 +322,7 @@ function App() {
 
   const createProfile = () => {
     setActiveProfileId(null);
-    setProfileName("New profile");
+    setProfileName("");
     setConfig(defaultConfig);
     setRememberSecret(false);
     setConnectionReport(null);
@@ -335,7 +335,7 @@ function App() {
   };
 
   const saveProfile = async () => {
-    const name = profileName.trim() || config.bucketName.trim() || "Untitled profile";
+    const name = profileName.trim();
     const profileId = activeProfileId ?? createId();
     const existingProfile = profiles.find((profile) => profile.id === profileId);
     const shouldKeepExistingSecret = rememberSecret && Boolean(existingProfile?.rememberSecret) && !hasSavableSecret(config);
@@ -641,7 +641,7 @@ function App() {
                   type="button"
                   onClick={() => void selectProfile(profile)}
                 >
-                  <span>{profile.name}</span>
+                  <span>{profile.name || profile.config.bucketName || profile.config.endpoint || "Unnamed profile"}</span>
                   <small>{profile.config.bucketName || profile.config.endpoint || "Unassigned"}</small>
                 </button>
               ))
