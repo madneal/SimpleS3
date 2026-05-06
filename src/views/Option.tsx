@@ -4,6 +4,7 @@ import "./style.css";
 export interface S3Config {
   accessKeyId: string;
   secretAccessKey: string;
+  sessionToken: string;
   region: string;
   bucketName: string;
   endpoint: string;
@@ -15,10 +16,12 @@ interface S3OptionsProps {
   config: S3Config;
   rememberSecret: boolean;
   busy: boolean;
+  canForgetSecret: boolean;
   onProfileNameChange: (name: string) => void;
   onConfigChange: (config: S3Config) => void;
   onRememberSecretChange: (rememberSecret: boolean) => void;
   onSave: () => void;
+  onForgetSecret: () => void;
   onTest: () => void;
 }
 
@@ -27,10 +30,12 @@ const Option = ({
   config,
   rememberSecret,
   busy,
+  canForgetSecret,
   onProfileNameChange,
   onConfigChange,
   onRememberSecretChange,
   onSave,
+  onForgetSecret,
   onTest,
 }: S3OptionsProps) => {
   const handleConfigChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -78,6 +83,17 @@ const Option = ({
           onChange={handleConfigChange}
           autoComplete="current-password"
           required
+        />
+      </label>
+
+      <label className="field">
+        <span>Session token</span>
+        <input
+          name="sessionToken"
+          type="password"
+          value={config.sessionToken}
+          onChange={handleConfigChange}
+          autoComplete="off"
         />
       </label>
 
@@ -130,15 +146,23 @@ const Option = ({
           checked={rememberSecret}
           onChange={(event) => onRememberSecretChange(event.target.checked)}
         />
-        <span>Remember secret locally</span>
+        <span>Save secret in OS keychain</span>
       </label>
 
       <div className="connection-actions">
         <button type="submit" className="primary-button" disabled={busy}>
           Test
         </button>
-        <button type="button" className="secondary-button" onClick={onSave}>
+        <button type="button" className="secondary-button" onClick={onSave} disabled={busy}>
           Save
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={onForgetSecret}
+          disabled={busy || !canForgetSecret}
+        >
+          Forget Secret
         </button>
       </div>
     </form>

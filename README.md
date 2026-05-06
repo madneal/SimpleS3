@@ -12,6 +12,7 @@ It is built with Tauri, React, TypeScript, and Rust. The Rust backend talks to S
 - Search the loaded objects in the current prefix.
 - Upload, download, delete, and create folder markers.
 - Load additional pages for large prefixes.
+- Store saved secrets and session tokens in the operating system keychain.
 
 ## Setup
 
@@ -52,6 +53,8 @@ For AWS S3, set the region and bucket name, then leave `Endpoint URL` empty.
 
 For S3-compatible providers, set the provider endpoint and enable `Path-style requests` when the provider requires it.
 
+Use `Session token` for temporary AWS credentials. Leave it empty for long-lived access keys.
+
 Example endpoints:
 
 ```text
@@ -73,6 +76,6 @@ The workflow builds macOS, Windows, and Linux bundles and uploads them to the Gi
 
 ## Security
 
-Profiles are saved in WebView local storage. Secrets are saved only when `Remember secret locally` is enabled.
+Profile metadata is saved in WebView local storage. Secret access keys and session tokens are saved in the operating system keychain only when `Save secret in OS keychain` is enabled.
 
-For production use, move saved secrets to the operating system keychain.
+Use `Forget Secret` to remove the saved keychain entry for the active profile.

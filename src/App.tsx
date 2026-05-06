@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { open, save } from "@tauri-apps/api/dialog";
 import { invoke } from "@tauri-apps/api/tauri";
 import "./App.css";
@@ -8,6 +8,7 @@ interface Profile {
   id: string;
   name: string;
   config: S3Config;
+  rememberSecret: boolean;
 }
 
 interface ConnectionReport {
@@ -39,6 +40,11 @@ interface ObjectAction {
   size: number;
 }
 
+interface StoredCredential {
+  secretAccessKey: string;
+  sessionToken: string;
+}
+
 type StatusKind = "idle" | "busy" | "success" | "error";
 
 interface Status {
@@ -51,6 +57,7 @@ const STORAGE_KEY = "simples3.profiles.v1";
 const defaultConfig: S3Config = {
   accessKeyId: "",
   secretAccessKey: "",
+  sessionToken: "",
   region: "us-east-1",
   bucketName: "",
   endpoint: "",
@@ -66,6 +73,43 @@ function createId() {
   return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function normalizeConfig(config: Partial<S3Config> = {}): S3Config {
+  return {
+    ...defaultConfig,
+    ...config,
+    accessKeyId: config.accessKeyId ?? "",
+    secretAccessKey: config.secretAccessKey ?? "",
+    sessionToken: config.sessionToken ?? "",
+    region: config.region ?? defaultConfig.region,
+    bucketName: config.bucketName ?? "",
+    endpoint: config.endpoint ?? "",
+    pathStyle: config.pathStyle ?? defaultConfig.pathStyle,
+  };
+}
+
+function configForStorage(config: S3Config): S3Config {
+  return {
+    ...config,
+    secretAccessKey: "",
+    sessionToken: "",
+  };
+}
+
+function hasSecretMaterial(config: S3Config) {
+  return Boolean(config.secretAccessKey.trim() || config.sessionToken.trim());
+}
+
+function hasSavableSecret(config: S3Config) {
+  return Boolean(config.secretAccessKey.trim());
+}
+
+function sanitizeProfiles(profiles: Profile[]) {
+  return profiles.map((profile) => ({
+    ...profile,
+    config: configForStorage(profile.config),
+  }));
+}
+
 function loadProfiles(): Profile[] {
   try {
     const rawProfiles = window.localStorage.getItem(STORAGE_KEY);
@@ -73,15 +117,27 @@ function loadProfiles(): Profile[] {
       return [];
     }
 
-    const parsed = JSON.parse(rawProfiles) as Profile[];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(rawProfiles) as Partial<Profile>[];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.map((profile) => {
+      const config = normalizeConfig(profile.config);
+      return {
+        id: profile.id ?? createId(),
+        name: profile.name ?? "Untitled profile",
+        config,
+        rememberSecret: Boolean(profile.rememberSecret ?? hasSecretMaterial(config)),
+      };
+    });
   } catch {
     return [];
   }
 }
 
 function saveProfiles(profiles: Profile[]) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizeProfiles(profiles)));
 }
 
 function initialState() {
@@ -93,7 +149,7 @@ function initialState() {
     activeProfileId: activeProfile?.id ?? null,
     profileName: activeProfile?.name ?? "New profile",
     config: activeProfile?.config ?? defaultConfig,
-    rememberSecret: Boolean(activeProfile?.config.secretAccessKey),
+    rememberSecret: Boolean(activeProfile?.rememberSecret),
   };
 }
 
@@ -172,6 +228,23 @@ function safeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function saveProfileSecret(profileId: string, config: S3Config) {
+  const credential: StoredCredential = {
+    secretAccessKey: config.secretAccessKey,
+    sessionToken: config.sessionToken,
+  };
+
+  await invoke("save_profile_secret", { profileId, credential });
+}
+
+async function loadProfileSecret(profileId: string) {
+  return invoke<StoredCredential>("load_profile_secret", { profileId });
+}
+
+async function deleteProfileSecret(profileId: string) {
+  await invoke("delete_profile_secret", { profileId });
+}
+
 function App() {
   const [boot] = useState(initialState);
   const [profiles, setProfiles] = useState<Profile[]>(boot.profiles);
@@ -213,20 +286,16 @@ function App() {
   const totalSize = objects.reduce((size, object) => size + object.size, 0);
 
   const setProfileStore = (nextProfiles: Profile[]) => {
-    setProfiles(nextProfiles);
-    saveProfiles(nextProfiles);
+    const sanitizedProfiles = sanitizeProfiles(nextProfiles);
+    setProfiles(sanitizedProfiles);
+    saveProfiles(sanitizedProfiles);
   };
 
-  const persistableConfig = () => ({
-    ...config,
-    secretAccessKey: rememberSecret ? config.secretAccessKey : "",
-  });
-
-  const selectProfile = (profile: Profile) => {
+  const selectProfile = async (profile: Profile) => {
     setActiveProfileId(profile.id);
     setProfileName(profile.name);
     setConfig(profile.config);
-    setRememberSecret(Boolean(profile.config.secretAccessKey));
+    setRememberSecret(profile.rememberSecret);
     setConnectionReport(null);
     setObjects([]);
     setPrefix("");
@@ -234,6 +303,21 @@ function App() {
     setNextToken(null);
     setSelectedKey(null);
     setStatus(defaultStatus);
+
+    if (profile.rememberSecret) {
+      try {
+        setStatus({ kind: "busy", text: "Loading saved secret" });
+        const credential = await loadProfileSecret(profile.id);
+        setConfig({
+          ...profile.config,
+          secretAccessKey: credential.secretAccessKey,
+          sessionToken: credential.sessionToken,
+        });
+        setStatus({ kind: "success", text: "Saved secret loaded" });
+      } catch (error) {
+        setStatus({ kind: "error", text: safeError(error) });
+      }
+    }
   };
 
   const createProfile = () => {
@@ -250,23 +334,104 @@ function App() {
     setStatus(defaultStatus);
   };
 
-  const saveProfile = () => {
+  const saveProfile = async () => {
     const name = profileName.trim() || config.bucketName.trim() || "Untitled profile";
-    const nextProfile: Profile = {
-      id: activeProfileId ?? createId(),
-      name,
-      config: persistableConfig(),
-    };
-    const exists = profiles.some((profile) => profile.id === nextProfile.id);
-    const nextProfiles = exists
-      ? profiles.map((profile) => (profile.id === nextProfile.id ? nextProfile : profile))
-      : [nextProfile, ...profiles];
+    const profileId = activeProfileId ?? createId();
+    const existingProfile = profiles.find((profile) => profile.id === profileId);
+    const shouldKeepExistingSecret = rememberSecret && Boolean(existingProfile?.rememberSecret) && !hasSavableSecret(config);
+    const shouldRememberSecret = rememberSecret && (hasSavableSecret(config) || shouldKeepExistingSecret);
 
-    setActiveProfileId(nextProfile.id);
-    setProfileName(name);
-    setProfileStore(nextProfiles);
-    setStatus({ kind: "success", text: "Profile saved" });
+    if (rememberSecret && !shouldRememberSecret) {
+      setStatus({ kind: "error", text: "Enter a secret access key before saving it to the keychain" });
+      return;
+    }
+
+    try {
+      setStatus({ kind: "busy", text: "Saving profile" });
+
+      if (rememberSecret && hasSavableSecret(config)) {
+        await saveProfileSecret(profileId, config);
+      } else if (!rememberSecret && activeProfileId) {
+        await deleteProfileSecret(profileId);
+      }
+
+      const nextProfile: Profile = {
+        id: profileId,
+        name,
+        config: configForStorage(config),
+        rememberSecret: shouldRememberSecret,
+      };
+      const exists = profiles.some((profile) => profile.id === nextProfile.id);
+      const nextProfiles = exists
+        ? profiles.map((profile) => (profile.id === nextProfile.id ? nextProfile : profile))
+        : [nextProfile, ...profiles];
+
+      setActiveProfileId(nextProfile.id);
+      setProfileName(name);
+      setProfileStore(nextProfiles);
+      setStatus({
+        kind: "success",
+        text: shouldRememberSecret ? "Profile saved. Secret stored in keychain." : "Profile saved",
+      });
+    } catch (error) {
+      setStatus({ kind: "error", text: safeError(error) });
+    }
   };
+
+  const forgetProfileSecret = async () => {
+    if (!activeProfileId) {
+      return;
+    }
+
+    try {
+      setStatus({ kind: "busy", text: "Removing saved secret" });
+      await deleteProfileSecret(activeProfileId);
+      const nextProfiles = profiles.map((profile) =>
+        profile.id === activeProfileId
+          ? { ...profile, rememberSecret: false, config: configForStorage(profile.config) }
+          : profile,
+      );
+
+      setProfileStore(nextProfiles);
+      setRememberSecret(false);
+      setConfig((currentConfig) => ({
+        ...currentConfig,
+        secretAccessKey: "",
+        sessionToken: "",
+      }));
+      setStatus({ kind: "success", text: "Saved secret removed" });
+    } catch (error) {
+      setStatus({ kind: "error", text: safeError(error) });
+    }
+  };
+
+  const migrateLegacySecrets = async (legacyProfiles: Profile[]) => {
+    try {
+      for (const profile of legacyProfiles) {
+        if (profile.rememberSecret && hasSavableSecret(profile.config)) {
+          await saveProfileSecret(profile.id, profile.config);
+        }
+      }
+
+      setProfileStore(legacyProfiles);
+      setStatus({ kind: "success", text: "Saved secrets moved to keychain" });
+    } catch (error) {
+      setStatus({ kind: "error", text: `Could not move saved secrets to keychain: ${safeError(error)}` });
+    }
+  };
+
+  useEffect(() => {
+    const legacyProfiles = boot.profiles.filter((profile) => hasSecretMaterial(profile.config));
+    if (legacyProfiles.length) {
+      void migrateLegacySecrets(boot.profiles);
+      return;
+    }
+
+    const activeProfile = boot.profiles.find((profile) => profile.id === boot.activeProfileId);
+    if (activeProfile?.rememberSecret) {
+      void selectProfile(activeProfile);
+    }
+  }, []);
 
   const updateConfig = (nextConfig: S3Config) => {
     setConfig(nextConfig);
@@ -474,7 +639,7 @@ function App() {
                   className={`profile-item ${activeProfileId === profile.id ? "active" : ""}`}
                   key={profile.id}
                   type="button"
-                  onClick={() => selectProfile(profile)}
+                  onClick={() => void selectProfile(profile)}
                 >
                   <span>{profile.name}</span>
                   <small>{profile.config.bucketName || profile.config.endpoint || "Unassigned"}</small>
@@ -489,10 +654,12 @@ function App() {
           config={config}
           rememberSecret={rememberSecret}
           busy={busy}
+          canForgetSecret={Boolean(activeProfileId && rememberSecret)}
           onProfileNameChange={setProfileName}
           onConfigChange={updateConfig}
           onRememberSecretChange={setRememberSecret}
-          onSave={saveProfile}
+          onSave={() => void saveProfile()}
+          onForgetSecret={() => void forgetProfileSecret()}
           onTest={testConnection}
         />
       </aside>

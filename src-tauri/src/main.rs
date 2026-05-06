@@ -2,18 +2,29 @@
 
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{config::Region, primitives::ByteStream, Client, Config};
+use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
+
+const KEYCHAIN_SERVICE: &str = "SimpleS3";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct S3Config {
     access_key_id: String,
     secret_access_key: String,
+    session_token: String,
     region: String,
     bucket_name: String,
     endpoint: String,
     path_style: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredCredential {
+    secret_access_key: String,
+    session_token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,11 +77,16 @@ fn client_from(config: &S3Config) -> Result<Client, String> {
     let access_key_id = required(&config.access_key_id, "Access key ID")?;
     let secret_access_key = required(&config.secret_access_key, "Secret access key")?;
     let region = required(&config.region, "Region")?;
+    let session_token = config.session_token.trim();
 
     let credentials = Credentials::new(
         access_key_id,
         secret_access_key,
-        None,
+        if session_token.is_empty() {
+            None
+        } else {
+            Some(session_token.to_owned())
+        },
         None,
         "simples3-static-credentials",
     );
@@ -102,6 +118,45 @@ fn normalize_prefix(prefix: Option<String>) -> String {
         .unwrap_or_default()
         .trim_start_matches('/')
         .to_owned()
+}
+
+fn keychain_entry(profile_id: &str) -> Result<Entry, String> {
+    let profile_id = required(profile_id, "Profile ID")?;
+    Entry::new(KEYCHAIN_SERVICE, &profile_id).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn save_profile_secret(profile_id: String, credential: StoredCredential) -> Result<(), String> {
+    required(&credential.secret_access_key, "Secret access key")?;
+    let payload = serde_json::to_string(&credential).map_err(|err| err.to_string())?;
+    keychain_entry(&profile_id)?
+        .set_password(&payload)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn load_profile_secret(profile_id: String) -> Result<StoredCredential, String> {
+    let secret = keychain_entry(&profile_id)?
+        .get_password()
+        .map_err(|err| match err {
+            KeyringError::NoEntry => "No saved secret was found for this profile".to_owned(),
+            other => other.to_string(),
+        })?;
+
+    serde_json::from_str(&secret).or_else(|_| {
+        Ok(StoredCredential {
+            secret_access_key: secret,
+            session_token: String::new(),
+        })
+    })
+}
+
+#[tauri::command]
+fn delete_profile_secret(profile_id: String) -> Result<(), String> {
+    match keychain_entry(&profile_id)?.delete_password() {
+        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -323,6 +378,9 @@ async fn create_folder(config: S3Config, key: String) -> Result<ObjectAction, St
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
+            save_profile_secret,
+            load_profile_secret,
+            delete_profile_secret,
             test_connection,
             list_objects,
             upload_file,
