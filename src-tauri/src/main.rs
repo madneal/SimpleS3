@@ -383,6 +383,7 @@ async fn create_folder(config: S3Config, key: String) -> Result<ObjectAction, St
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             save_profile_secret,
             load_profile_secret,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { open, save } from "@tauri-apps/api/dialog";
-import { invoke } from "@tauri-apps/api/tauri";
+import { invoke } from "@tauri-apps/api/core";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import Option, { type S3Config } from "./views/Option";
 
